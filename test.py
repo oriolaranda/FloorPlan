@@ -28,7 +28,7 @@ def test_env():
 def testing():
     config = {
         "data_dir": "./data",
-        "window_size": 512
+        "window_size": 1024
     }
 
     env = FloorPlanEnv(config)

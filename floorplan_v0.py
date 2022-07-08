@@ -38,66 +38,83 @@ class FloorPlanEnv(gym.Env):
     def __init__(self, config):
         super(FloorPlanEnv, self).__init__()
 
-        # Render Settings
+        # RENDER SETTINGS
+        ##################
         self.window_size = config.get('window_size', 256)
         self.scale = self.window_size // 256
 
         # SETUP PARAMETERS
-        # self.perimetre = 0  # TODO: info?
-        self.num_rooms = config.get('num_rooms', 8)
-        self.total_steps = config.get('total_steps', 1000)
-
-        fixed_rooms = config.get('fixed_rooms', [0, 1, 2, 3])
-        optional_rooms = np.random.randint(3, 12, size=self.num_rooms - len(fixed_rooms))
-        total_rooms = fixed_rooms + list(optional_rooms)
-        self.rooms_type = dict(zip(range(self.num_rooms), total_rooms))
+        ###################
+        self.steps_per_episode = config.get('steps_per_episode', 1000)
+        self.num_rooms, self.rooms_type = self._decide_rooms(config)
 
         # OBSERVATION SPACE
+        ####################
+        # Observation space for each room (Dict)
         obs_space = dict()
         for room in range(self.num_rooms):
             space = spaces.Dict({
                 "pos": spaces.Box(low=0, high=255, shape=(2,), dtype=np.uint8),
-                "size": spaces.Discrete(5),
+                "size": spaces.Box(low=5, high=2000, shape=(1,), dtype=np.uint8),
                 "proportion": spaces.Box(low=0.1, high=10, shape=(1,), dtype=np.float16)
             })
             obs_space.update({room: space})
+        # Defining observation space
         self.observation_space = spaces.Dict(obs_space)
 
         # ACTION SPACE
-        self._action_ids = {
+        ###############
+        # Mapping from discrete actions to state variable and values
+        self.action_ids = {
             0: ("pos", [5, 0]),
             1: ("pos", [-5, 0]),
             2: ("pos", [0, 5]),
             3: ("pos", [0, -5]),
-            4: ("size", 1),
-            5: ("size", -1),
+            4: ("size", 400),
+            5: ("size", -400),
             6: ("proportion", 0.25),
             7: ("proportion", -0.25),
         }
-        self.action_space = spaces.Box(low=np.array([0, 0]),
-                                       high=np.array([self.num_rooms - 1, len(self._action_ids) - 1]), dtype=np.uint8)
 
+        # Defining the action space
+        self.action_space = spaces.Box(low=np.array([0, 0]),
+                                       high=np.array([self.num_rooms - 1, len(self.action_ids) - 1]),
+                                       dtype=np.uint8)
         # Clipping action space
         self.bounds = {
             "pos": (0, 255),
-            "size": (1, 10),
+            "size": (400, 2000),
             "proportion": (0.1, 10)
         }
 
-        # Floor Image
+        # INFO FROM FLOOR IMAGE
+        ########################
         self.floors = self._load_floors(config['data_dir'])
         self.floor = next(self.floors)
         self.canvas_floor = self._make_canvas_floor()
         self.rows, self.cols = self._compute_floor_limits()
-
-        # Interior mask
-        self.interior = self.floor[3]
+        self.floor_area = self._compute_floor_area()
+        self.door_pos = self._compute_door_pos()
 
         # Initialization
         self.current_step = 0
         self.window = None
         self.clock = None
         self.current_state = None
+
+    def _decide_rooms(self, config):
+        num_rooms = config.get('num_rooms', 8)
+        fixed_rooms = config.get('fixed_rooms', [0, 1, 2, 3])
+        assert len(fixed_rooms) <= num_rooms, "Number of rooms is smaller than the given fixed rooms"
+
+        rooms_left = num_rooms - len(fixed_rooms)
+        optional_rooms = []
+        if rooms_left > 0:
+            optional_rooms = list(np.random.randint(3, 12, size=rooms_left))
+
+        all_rooms = fixed_rooms + optional_rooms
+        rooms_type = dict(zip(range(num_rooms), all_rooms))
+        return num_rooms, rooms_type
 
     def _load_floors(self, data_dir):
         # Load the entire dataset as a generator
@@ -135,34 +152,43 @@ class FloorPlanEnv(gym.Env):
         img[:, :, 2] = raw
 
         if self.scale > 1:
-            img = Image.fromarray(img).resize(size=(self.window_size,)*2, resample=Image.NEAREST)
+            img = Image.fromarray(img).resize(size=(self.window_size,) * 2, resample=Image.NEAREST)
         return img
 
+    def _compute_floor_area(self):
+        floor = self.floor[:, :, 3]
+        floor_area = (floor == 255).sum()
+        return floor_area
+
+    def _compute_door_pos(self):
+        floor = self.floor[:, :, 0]
+        door_positions = list(zip(*np.where(floor == 255)))
+        door_pos = np.rint(np.mean(door_positions, axis=0)).astype(np.uint8)  # mean of positions
+        return door_pos
+
     def _distance_to_door(self, room):
-        pos_door = self.floor[0]
-        pos_room = self.current_state[room]["pos"]
+        room_pos = self.current_state[room]["pos"]
         euclidean = lambda x, y: np.linalg.norm(x - y)
-        return euclidean(pos_room, pos_door)
+        return euclidean(room_pos, self.door_pos)
 
     def reset(self, seed=None, return_info=False):
         # Reset the state of the environment to an initial state
         self.current_state = dict()
         for room in range(self.num_rooms):
-            room_state = {
-                "type": self.rooms_type[room],  # TODO: better in info
-                "pos": self._get_initial_position(),
-                "size": np.random.randint(1, 5),
+            room_dimension = {
+                "type": self.rooms_type[room],  # TODO: better in info?
+                "size": np.random.randint(1, 5) * 400,
                 "proportion": 1,
-                # "dist_to_door": self._distance_to_door(room) #TODO: better in info
             }
-            self.current_state.update({room: room_state})
+            self.current_state.update({room: room_dimension})
+            self.current_state[room]["pos"] = self._get_initial_position(room)
 
         obs = self._get_obs()
         return obs
 
-    def _get_initial_position(self):
+    def _get_initial_position(self, room):
         rnd_pos = np.random.randint(0, 255, size=2)
-        while not self._is_inside_perimeter(rnd_pos):
+        while not self._is_inside_perimeter(rnd_pos, room):
             rnd_pos = np.random.randint(0, 255, size=2)
         return rnd_pos
 
@@ -171,23 +197,21 @@ class FloorPlanEnv(gym.Env):
         self._take_action(action)
         self.current_step += 1
 
-        reward = 0
-        done = self.current_step >= self.total_steps
+        reward = self._compute_reward()
+        done = self.current_step >= self.steps_per_episode
         info = self._get_info()
         obs = self._get_obs()
         return obs, reward, done, info
 
-    def _is_inside_perimeter(self, pos):
+    def _is_inside_perimeter(self, pos, b, h):
         x, y = pos
-        if not (0 <= x <= 255):
-            return False
-        if not (0 <= x <= 255):
+        if not (0 <= x <= 255 and 0 <= y <= 255):
             return False
         if not (self.rows[y] and self.cols[x]):
             return False
 
-        inside_row = self.rows[y][0] < x < self.rows[y][1]
-        inside_col = self.cols[x][0] < y < self.cols[x][1]
+        inside_row = self.rows[y][0] + b//2 < x < self.rows[y][1] - b//2
+        inside_col = self.cols[x][0] + h//2 < y < self.cols[x][1] - h//2
         return inside_row and inside_col
 
     def _is_available(self, new_pos, room):
@@ -197,7 +221,11 @@ class FloorPlanEnv(gym.Env):
     def _clip_movements(self, prev_pos, movement, room):
         new_pos = prev_pos + movement
         new_pos_is_available = self._is_available(new_pos, room)
-        new_pos_is_inside = self._is_inside_perimeter(new_pos)
+        area = self.current_state[room]['size']
+        prop = self.current_state[room]['proportion']
+        b = np.sqrt(area * prop)
+        h = (area / b)
+        new_pos_is_inside = self._is_inside_perimeter(new_pos, b, h)
         if new_pos_is_inside and new_pos_is_available:
             return new_pos
         return prev_pos
@@ -206,13 +234,18 @@ class FloorPlanEnv(gym.Env):
         # Make changes to our environment
         room, action_id = action
 
-        state_variable, value = self._action_ids[action_id]
+        state_variable, value = self.action_ids[action_id]
         prev_value = self.current_state[room][state_variable]
         if state_variable == "pos":
             self.current_state[room]["pos"] = self._clip_movements(prev_value, value, room)
         else:
             low, high = self.bounds[state_variable]
-            self.current_state[room][state_variable] = np.clip(prev_value + value, low, high)
+            clipped_value = np.clip(prev_value + value, low, high)
+            room_is_inside = self._is_inside_perimeter()
+            self.current_state[room][state_variable] = None
+
+    def _compute_reward(self):
+        return None
 
     def _get_obs(self):
         # Return the next observation
@@ -231,7 +264,9 @@ class FloorPlanEnv(gym.Env):
                 'top': dt,
                 'down': dd
             }
-            info.update({room: {"distances": distances}})
+            info.update({room: {"distances": distances,
+                                "dist_to_door": self._distance_to_door(room)
+                                }})
         return info
 
     def render(self, mode='human', close=False):
@@ -252,29 +287,29 @@ class FloorPlanEnv(gym.Env):
         # Adding each room bounds and centroid
         for room in range(self.num_rooms):
             coord = self.current_state[room]["pos"] * self.scale
-            area = (self.current_state[room]["size"] + 1) * 200 * self.scale**2
+            area = (self.current_state[room]["size"]) * self.scale ** 2
             prop = self.current_state[room]["proportion"]
             color = cmap[2][room][0]
 
             # Now we draw the room
             #   _____________
             #  |             |
-            # w|      c      |
+            #  |      c      | h
             #  |_____________|
-            #         l
-            # length (l) and width (w)
-            #  area = l*w
-            #  prop = l/w
-            #  l = srqt(area*prop)
+            #         b
+            # base (b) and height (h)
+            #  area = b*h
+            #  prop = b/h
+            #  b = srqt(area*prop)
 
-            l = np.sqrt(area * prop)
-            w = (area / l)
+            b = np.sqrt(area * prop)
+            h = (area / b)
 
             # Entire room rectangle
-            room_coord = coord + [-l // 2, -w // 2]
-            pygame.draw.rect(canvas_floor, color, pygame.Rect(room_coord, (l, w)), width=self.scale)  # Room border
+            room_coord = coord + [-b // 2, -h // 2]
+            pygame.draw.rect(canvas_floor, color, pygame.Rect(room_coord, (b, h)), width=self.scale)  # Room border
 
-            room_area = pygame.Surface((l, w))  # Tranparency room area
+            room_area = pygame.Surface((b, h))  # Tranparency room area
             room_area.set_alpha(100)  # Alpha level determine transparency
             room_area.fill(color)  # this fills the entire surface
             canvas_floor.blit(room_area, room_coord)
