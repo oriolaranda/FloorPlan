@@ -188,7 +188,11 @@ class FloorPlanEnv(gym.Env):
 
     def _get_initial_position(self, room):
         rnd_pos = np.random.randint(0, 255, size=2)
-        while not self._is_inside_perimeter(rnd_pos, room):
+        area = self.current_state[room]['size']
+        prop = self.current_state[room]['proportion']
+        b = np.sqrt(area * prop)
+        h = (area / b)
+        while not self._is_inside_perimeter(rnd_pos, b, h):
             rnd_pos = np.random.randint(0, 255, size=2)
         return rnd_pos
 
@@ -241,8 +245,8 @@ class FloorPlanEnv(gym.Env):
         else:
             low, high = self.bounds[state_variable]
             clipped_value = np.clip(prev_value + value, low, high)
-            room_is_inside = self._is_inside_perimeter()
-            self.current_state[room][state_variable] = None
+            # room_is_inside = self._is_inside_perimeter()
+            self.current_state[room][state_variable] = clipped_value
 
     def _compute_reward(self):
         return None
